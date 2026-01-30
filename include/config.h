@@ -1,9 +1,18 @@
-#pragma once
-
 #include <Arduino.h>
 #include "esp_camera.h"
 
-#define CAM_PIX_FORMAT PIXFORMAT_JPEG
+#define DEBUG
+#define DETECTION_THRESHOLD 0
+
+#define CAM_WIDTH 160
+#define CAM_HEIGHT 120
 #define CAM_FRAME_SIZE FRAMESIZE_QQVGA
+#define CAM_BUFFER_SIZE (CAM_WIDTH * CAM_HEIGHT * 3)
+
+#define USE_CAM_BUFFER
+#define CAM_PIX_FORMAT PIXFORMAT_JPEG
+
 #define CAM_JPEG_QUALITY 12
 #define CAM_FB_LOCATION CAMERA_FB_IN_DRAM
+
+// #define EI_CLASSIFIER_ALLOCATION_STATIC 1
