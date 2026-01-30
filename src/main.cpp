@@ -1,3 +1,8 @@
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
+#include "esp_task_wdt.h"
+
 #include "SPIFFS.h"
 #include "camera_config.cpp"
 #include "ObjDetection1_inferencing.h"
@@ -7,94 +12,211 @@
 #define FRAMEBUFFER_SIZE (EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT * 3)
 
 
+void listSPIFFSFiles();
 static int get_image_data(size_t offset, size_t length, float* out);
 void bilinear_resize_rgb(const uint8_t* src, int src_w, int src_h, uint8_t *dst, int dst_w, int dst_h);
 void inference_task(void *pvParameters);
 
+
+SemaphoreHandle_t fb_mutex;
+TaskHandle_t inferenceTaskHandle = NULL;
 static uint8_t* framebuffer = nullptr;
 static ei_impulse_result_t result = { 0 };
 static signal_t phantom_signal = { .get_data = nullptr, .total_length = FRAMEBUFFER_SIZE };
+static uint64_t last_beeped = 0;
+
+File audio_file; uint64_t last_sample_micros = 0;
+const uint64_t SAMPLE_INTERVAL = (1000000UL / AUDIO_SAMPLE_RATE);
+
+static inline void debug_print(const char* string) {
+    #ifdef DEBUG
+    Serial.println(string);
+    #endif
+}
+
 
 void setup() {
     // Serial chaalu kiya jaa rha hai
     Serial.begin(115200); delay(500);
+    debug_print("✅ Serial safaltapoorvak prarambh ho gaya.");
+
+    debug_print("👉 SPIFFS Filesystem mount kiya jaa rha hai ...");
+    SPIFFS.begin(); listSPIFFSFiles();
+    debug_print("✅ SPIFFS Filesystem safaltapoorvak mount ho gaya.");
+
+    debug_print("👉 PWM pin par LEDC (Audio) setup kiya jaa rha hai ...");
+    ledcSetup(PWM_CHANNEL, PWN_FREQUENCY, PWM_RESOLUTION);
+    ledcAttachPin(AUDIO_PIN, PWM_CHANNEL);
+    debug_print("✅ PWM pin par LEDC (Audio) setup safaltapoorvak ho gaya.");
 
     // framebuffer allocation
+    debug_print("👉 framebuffer ko sthaan prapt karvaya jaa rha hai ...");
+    #ifdef USE_CAM_BUFFER
     framebuffer = (uint8_t*)malloc(CAM_BUFFER_SIZE);
+    #else
+    framebuffer = (uint8_t*)malloc(FRAMEBUFFER_SIZE);
+    #endif
     if (framebuffer == NULL) {
         Serial.println("⁉️ framebuffer ko sthaan prapt nahi ho paaya ‼️");
         while (true) delay(1000);
     }
+    debug_print("✅ framebuffer ko safaltapoorvak sthaan prapt ho gaya.");
 
     // camera initialization
+    debug_print("👉 Camera prarambh kiya jaa rha hai ...");
     esp_err_t cam_init_status = esp_camera_init(&camera_config);
     if (cam_init_status != ESP_OK) {
         Serial.println("⁉️ Camera prarambh nahi ho paaya ‼️");
         while (true) delay (1000);
     }
+    debug_print("✅ Camera safaltapoorvak prarambh ho gaya.");
 
     // OV3660 special setup
     sensor_t* cam_sensor = esp_camera_sensor_get();
     if (cam_sensor->id.PID == OV3660_PID) {
+        debug_print("👉 Camera OV3600 ke liye khaas settings ki jaa rahi hai ...");
         cam_sensor->set_vflip(cam_sensor, 1);
         cam_sensor->set_hmirror(cam_sensor, 1);
         cam_sensor->set_brightness(cam_sensor, 1);
         cam_sensor->set_saturation(cam_sensor, 1);
     }
+    debug_print("✅ Camera poori tarah taiyaar ho gaya.");
+
+    debug_print("👉 framebuffer mutex banaya jaa rha hai ...");
+    fb_mutex = xSemaphoreCreateMutex();
+    if (!fb_mutex) {
+        Serial.println("⁉️ framebuffer mutex nahi ban paaya ‼️");
+        while (true) delay(1000);
+    }
+    debug_print("✅ framebuffer mutex safaltapoorvak ban gaya.");
+
+    xTaskCreatePinnedToCore(
+        inference_task,
+        "EI_Inference",
+        10000,   // stack size
+        NULL,
+        1,
+        &inferenceTaskHandle,
+        1        // CORE 1
+    );
+
+    debug_print("✅ Setup function safaltapoorvak sampann hua.");
 }
 
 void loop() {
-    // capture frame
-    camera_fb_t* fb = esp_camera_fb_get();
-    if (!fb) {
-        Serial.println("⁉️ Camera se frame nahi le sake ‼️");
-        delay(1000); return;
+    if (xSemaphoreTake(fb_mutex, portMAX_DELAY)) {
+        // capture frame
+        debug_print("👉 Camera se frame liya jaa rha hai ...");
+        camera_fb_t* fb = esp_camera_fb_get();
+        if (!fb) {
+            Serial.println("⁉️ Camera se frame nahi le sake ‼️");
+            delay(1000); return;
+        }
+        debug_print("✅ Camera se safaltapoorvak frame le liya.");
+
+        // convert to rgb888 (if needed)
+        #ifdef USE_CAM_BUFFER
+        debug_print("👉 frame ko rgb888 me parivartit kiya jaa rha hai ...");
+        bool converted = fmt2rgb888(fb->buf, fb->len, CAM_PIX_FORMAT, framebuffer);
+        if (!converted) {
+            Serial.println("⁉️ frame rgb888 me parivartit nahi ho paaya ‼️");
+            delay(1000); return;
+        }
+        debug_print("✅ frame safaltapoorvak rgb888 me parivartit ho gaya.");
+
+        // save dimensions
+        uint16_t source_width = fb->width;
+        uint16_t source_height = fb->height;
+
+        // return the frame buffer
+        debug_print("👉 Camera ko frame buffer vapas diya jaa raha hai ...");
+        esp_camera_fb_return(fb);
+        debug_print("✅ Camera ko frame buffer vapas de diya.");
+
+        // resize frame buffer
+        debug_print("👉 frame ko resize kara jaa rha hai ...");
+        bilinear_resize_rgb(
+            framebuffer, source_width,
+            source_height, framebuffer,
+            EI_CLASSIFIER_INPUT_WIDTH,
+            EI_CLASSIFIER_INPUT_HEIGHT
+        );
+        debug_print("✅ frame safaltapoorvak resize ho gaya.");
+        #else
+        bilinear_resize_rgb(
+            fb->buf, fb->width,
+            fb->height, framebuffer,
+            EI_CLASSIFIER_INPUT_WIDTH,
+            EI_CLASSIFIER_INPUT_HEIGHT
+        );
+
+        // return the frame buffer
+        debug_print("👉 Camera ko frame buffer vapas diya jaa raha hai ...");
+        esp_camera_fb_return(fb);
+        debug_print("✅ Camera ko frame buffer vapas de diya.");
+        #endif
+
+        xSemaphoreGive(fb_mutex);
     }
 
-    // convert to rgb888 (if needed)
-    bool converted = fmt2rgb888(fb->buf, fb->len, CAM_PIX_FORMAT, framebuffer);
-    if (!converted) {
-        Serial.println("⁉️ frame rgb888 me parivartit nahi ho paaya ‼️");
-        delay(1000); return;
-    }
+    vTaskDelay(pdMS_TO_TICKS(30));
+}
 
-    // save dimensions
-    uint16_t source_width = fb->width;
-    uint16_t source_height = fb->height;
+void inference_task(void *pvParameters) {
+    while (true) {
+        if (xSemaphoreTake(fb_mutex, portMAX_DELAY)) {
+            debug_print("👉 Object Detection Model run kiya jaa rha hai ...");
+            phantom_signal.get_data = &get_image_data;
+            esp_task_wdt_reset();
+            EI_IMPULSE_ERROR err = run_classifier(&phantom_signal, &result, false);
+            esp_task_wdt_reset();
+            if (err != EI_IMPULSE_OK) {
+                Serial.printf("⁉️  Object Detection Model run nahi ho paaya (Err: %d) ‼️\n", err);
+                continue;
+            }
+            debug_print("✅ Object Detection safaltapoorvak sampann hua");
+            xSemaphoreGive(fb_mutex);
+        }
 
-    // return the frame buffer
-    esp_camera_fb_return(fb);
-
-    // resize frame buffer
-    bilinear_resize_rgb(
-        framebuffer, source_width,
-        source_height, framebuffer,
-        EI_CLASSIFIER_INPUT_WIDTH,
-        EI_CLASSIFIER_INPUT_HEIGHT
-    );
-
-    // return the frame buffer
-    esp_camera_fb_return(fb);
-
-    phantom_signal.get_data = &get_image_data;
-    EI_IMPULSE_ERROR err = run_classifier(&phantom_signal, &result, false);
-    if (err != EI_IMPULSE_OK) {
-        Serial.println("⁉️  Object Detection Model run nahi ho paaya ‼️");
-        return;
-    }
-
-    Serial.printf(
-        "ℹ️ Predictions [ DSP: %dms | Classification: ❕%dms❕ | Anomaly: %dms ] ~\n",
-        result.timing.dsp, result.timing.classification, result.timing.anomaly
-    );
-
-    for (uint8_t i = 0; i < result.bounding_boxes_count; i++) {
-        ei_impulse_result_bounding_box_t bb = result.bounding_boxes[i];
-        if (bb.value < DETECTION_THRESHOLD) continue;
         Serial.printf(
-            "\t👉 %s - %.0f%% - [ pos: (%u, %u) | size: (%u, %u) ]\n",
-            bb.label, round(bb.value*100), bb.x, bb.y, bb.width, bb.height
-        ); if (i+1 == result.bounding_boxes_count) Serial.println("");
+            "ℹ️  Predictions [ DSP: %dms | Classification: ❕%dms❕ | Anomaly: %dms ] ~\n",
+            result.timing.dsp, result.timing.classification, result.timing.anomaly
+        );
+
+        for (uint8_t i = 0; i < result.bounding_boxes_count; i++) {
+            ei_impulse_result_bounding_box_t bb = result.bounding_boxes[i];
+            if (bb.value < DETECTION_THRESHOLD) continue;
+            Serial.printf(
+                "\t👉 %s - %.0f%% - [ pos: (%u, %u) | size: (%u, %u) ]\n",
+                bb.label, round(bb.value*100), bb.x, bb.y, bb.width, bb.height
+            ); if (i+1 == result.bounding_boxes_count) Serial.println("");
+            // audio_file = SPIFFS.open("/does_not_exists", "r"); // assigning null file
+            if (strcmp(bb.label, "50_INR") == 0) {
+                audio_file = SPIFFS.open("/50_INR.raw", "r");
+            } else if (strcmp(bb.label, "100_INR") == 0) {
+                audio_file = SPIFFS.open("/100_INR.raw", "r");
+            } else if (strcmp(bb.label, "person") == 0) {
+                audio_file = SPIFFS.open("/PERSON.raw", "r");
+            } else { Serial.printf("\t\t⁉️ Unexpected label: \"%s\"\n", bb.label); }
+            if (audio_file) {
+                // ledcWrite(0, 0);
+                uint8_t* sample; uint64_t now;
+                uint32_t file_size = audio_file.size();
+                audio_file.read(sample, audio_file.size());
+                for (size_t idx = 0; idx < file_size; ) {
+                    now = micros();
+                    if (now - last_sample_micros >= SAMPLE_INTERVAL) {
+                        last_sample_micros = now;
+                        // ledcWrite(PWM_CHANNEL, constrain((int)((sample - 128) * VOLUME + 128), 0, 255));
+                        ledcWrite(PWM_CHANNEL, (sample[idx] - 128) * VOLUME + 128);
+                        idx++;
+                    }
+                }; audio_file.close();
+            }
+        }
+
+        debug_print("\n---------------------------------\n");
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -142,4 +264,14 @@ void bilinear_resize_rgb(const uint8_t *src, int src_w, int src_h, uint8_t *dst,
             }
         }
     }
+}
+
+void listSPIFFSFiles() {
+    Serial.println("_---SPIFFS Files-----");
+    File root = SPIFFS.open("/");
+    File file = root.openNextFile();
+    while (file) {
+        Serial.println(file.name());
+        file = root.openNextFile();
+    }; Serial.println("----------------------");
 }

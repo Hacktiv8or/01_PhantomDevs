@@ -16,3 +16,11 @@
 #define CAM_FB_LOCATION CAMERA_FB_IN_DRAM
 
 // #define EI_CLASSIFIER_ALLOCATION_STATIC 1
+
+#define AUDIO_PIN 40 // PWM-capable GPIO
+#define PWM_CHANNEL 0
+#define PWN_FREQUENCY 30000 // >= 20 kHz
+#define PWM_RESOLUTION 8 // 8-bit resolution
+
+#define AUDIO_SAMPLE_RATE 16000 // must match ffmpeg output
+#define VOLUME 5 // multiplier
