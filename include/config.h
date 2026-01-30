@@ -1,8 +1,8 @@
 #include <Arduino.h>
 #include "esp_camera.h"
 
-#define DEBUG
-#define DETECTION_THRESHOLD 0
+// #define DEBUG
+#define DETECTION_THRESHOLD 0.4
 
 #define CAM_WIDTH 160
 #define CAM_HEIGHT 120
@@ -24,3 +24,7 @@
 
 #define AUDIO_SAMPLE_RATE 16000 // must match ffmpeg output
 #define VOLUME 5 // multiplier
+
+#define BEEP_DELAY 60000
+#define BEEP_DURATION 150
+#define BEEP_FREQUENCY 1000
