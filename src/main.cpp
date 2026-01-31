@@ -76,6 +76,8 @@ void setup() {
     }
     debug_print("✅ Camera poori tarah taiyaar ho gaya.");
 
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+
     debug_print("✅ Setup function safaltapoorvak sampann hua.");
 }
 
@@ -194,6 +196,11 @@ void loop() {
                 idx++;
             }
         }; last_beeped = millis();
+    }
+
+    if (digitalRead(BUTTON_PIN) == LOW) {
+        // SOS Support
+        Serial.println("Button is pressed");
     }
 
     debug_print("\n---------------------------------\n");
